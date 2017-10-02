@@ -1,0 +1,153 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Sep 23 18:31:18 2017
+
+@author: dawit
+"""
+
+import numpy as np
+from sklearn.utils import shuffle
+import pickle
+from sklearn.cross_validation import train_test_split
+from keras.utils import np_utils
+from keras.preprocessing.image import ImageDataGenerator
+from keras.applications.inception_v3 import InceptionV3, preprocess_input
+from keras.models import Model
+from keras.layers import Dense, GlobalAveragePooling2D
+from keras.optimizers import SGD
+nb_classes = 10
+HEIGHT = 96
+WIDTH = 96
+DEPTH = 3
+batch_size = 32
+epochs =300
+NB_IV3_LAYERS_TO_FREEZE = 300
+FC_SIZE = 1024
+# size of a single image in bytes
+SIZE = HEIGHT * WIDTH * DEPTH
+
+train_X = []
+train_Y = []
+test_X = []
+test_Y = []
+train_path_X= './data/stl10_binary/train_X.bin'
+train_path_Y = './data/stl10_binary/train_y.bin'
+test_path_X = './data/stl10_binary/test_X.bin'
+test_path_Y = './data/stl10_binary/test_y.bin'
+
+def read_all_images(path_to_data):
+    """
+    :param path_to_data: the file containing the binary images from the STL-10 dataset
+    :return: an array containing all the images
+    """
+
+    with open(path_to_data, 'rb') as f:
+        # read whole file in uint8 chunks
+        everything = np.fromfile(f, dtype=np.uint8)
+
+        # We force the data into 3x96x96 chunks, since the
+        # images are stored in "column-major order", meaning
+        # that "the first 96*96 values are the red channel,
+        # the next 96*96 are green, and the last are blue."
+        # The -1 is since the size of the pictures depends
+        # on the input file, and this way numpy determines
+        # the size on its own.
+
+        images = np.reshape(everything, (-1, 3, 96, 96))
+
+        # Now transpose the images into a standard image format
+        # readable by, for example, matplotlib.imshow
+        # You might want to comment this line or reverse the shuffle
+        # if you will use a learning algorithm like CNN, since they like
+        # their channels separated.
+        images = np.transpose(images, (0, 3, 2, 1))
+        return images
+
+def read_labels(path_to_labels):
+    """
+    :param path_to_labels: path to the binary file containing labels from the STL-10 dataset
+    :return: an array containing the labels
+    """
+    with open(path_to_labels, 'rb') as f:
+        labels = np.fromfile(f, dtype=np.uint8)
+        return labels
+
+train_X = read_all_images(train_path_X)
+test_X = read_all_images(test_path_X)
+train_Y= read_labels(train_path_Y)
+test_Y = read_labels(test_path_Y)
+        
+train_X = train_X.astype('float32')
+test_X = test_X.astype('float32')
+
+train_X /= 255
+test_X /= 255
+train_Y = train_Y-1
+test_Y = test_Y-1
+# convert class vectors to binary class matrices
+train_Y= np_utils.to_categorical(np.asarray(train_Y),10)
+test_Y = np_utils.to_categorical(np.asarray(test_Y),10)
+
+datagen = ImageDataGenerator(
+        featurewise_center=False,  # set input mean to 0 over the dataset
+        samplewise_center=False,  # set each sample mean to 0
+        featurewise_std_normalization=False,  # divide inputs by std of the dataset
+        samplewise_std_normalization=False,  # divide each input by its std
+        zca_whitening=False,  # apply ZCA whitening
+        rotation_range=0,  # randomly rotate images in the range (degrees, 0 to 180)
+        width_shift_range=0.1,  # randomly shift images horizontally (fraction of total width)
+        height_shift_range=0.1,  # randomly shift images vertically (fraction of total height)
+        horizontal_flip=True,  # randomly flip images
+        vertical_flip=False)  # randomly flip images
+
+    # Compute quantities required for feature-wise normalization
+    # (std, mean, and principal components if ZCA whitening is applied).
+datagen.fit(train_X)
+
+def setup_to_transfer_learn(model, base_model):
+  """Freeze all layers and compile the model"""
+  for layer in base_model.layers:
+    layer.trainable = False
+  model.compile(optimizer='rmsprop', loss='categorical_crossentropy', metrics=['accuracy'])
+
+
+def add_new_last_layer(base_model, nb_classes):
+  """Add last layer to the convnet
+  Args:
+    base_model: keras model excluding top
+    nb_classes: # of classes
+  Returns:
+    new keras model with last layer
+  """
+  x = base_model.output
+  x = GlobalAveragePooling2D()(x)
+  x = Dense(FC_SIZE, activation='relu')(x) #new FC layer, random init
+  predictions = Dense(nb_classes, activation='softmax')(x) #new softmax layer
+  model = Model(input=base_model.input, output=predictions)
+  return model
+
+
+def setup_to_finetune(model):
+  """Freeze the bottom NB_IV3_LAYERS and retrain the remaining top layers.
+  note: NB_IV3_LAYERS corresponds to the top 2 inception blocks in the inceptionv3 arch
+  Args:
+    model: keras model
+  """
+  for layer in model.layers[:NB_IV3_LAYERS_TO_FREEZE]:
+     layer.trainable = False
+  for layer in model.layers[NB_IV3_LAYERS_TO_FREEZE:]:
+     layer.trainable = True
+  model.compile(optimizer=SGD(lr=0.0001, momentum=0.9), loss='categorical_crossentropy', metrics=['accuracy'])
+
+base_model = InceptionV3(weights='imagenet', include_top=False)
+model = add_new_last_layer(base_model,nb_classes)
+setup_to_transfer_learn(model, base_model)
+setup_to_finetune(model)
+
+model.fit_generator(datagen.flow(train_X, train_Y,
+                                     batch_size=batch_size),
+                        steps_per_epoch=train_X.shape[0] // batch_size,
+                        epochs=epochs,
+validation_data=(test_X, test_Y))
+    
